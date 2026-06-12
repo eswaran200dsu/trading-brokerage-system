@@ -1,0 +1,1 @@
+import{j as o,U as e,E as r}from"./index-BENOL5fj.js";import{i as a}from"./api-5Z4rypmN.js";const i=()=>o.jsx(e,{title:"Upload Brokerage",description:"Upload daily or monthly brokerage Excel.",expected:r.brokerage,action:a});export{i as component};
