@@ -1,1 +1,0 @@
-import{j as o,O as e}from"./index-BENOL5fj.js";import{R as t,A as r}from"./RequireRole-BpZR0gF4.js";import"./users-CAN2FlH8.js";import"./key-round-BCGLpvW3.js";const n=()=>o.jsx(t,{role:"client",children:o.jsx(r,{role:"client",children:o.jsx(e,{})})});export{n as component};
