@@ -8,8 +8,7 @@ function detectApiBaseUrl() {
   const host = window.location.hostname || "127.0.0.1";
   return `http://${host}:5000`;
 }
-
-export const API_BASE_URL = detectApiBaseUrl();
+export const API_BASE_URL = "https://trading-brokerage-system.onrender.com";
 
 // ---------- Types ----------
 export type Role = "admin" | "client";
