@@ -1,313 +1,170 @@
-import os
-import sqlite3
+$path = "backend\db.py"
+$content = Get-Content $path -Raw
 
-import pymysql
-import pymysql.cursors
-from flask import g
-from config import Config
+$marker = "    # Create/repair default admin using runtime bcrypt so hash is always correct."
+$before = $content.Substring(0, $content.IndexOf($marker))
 
-
-class SQLiteCursor:
-    """Small adapter so existing PyMySQL-style code works with SQLite."""
-
-    def __init__(self, cursor):
-        self.cursor = cursor
-
-    @property
-    def lastrowid(self):
-        return self.cursor.lastrowid
-
-    @property
-    def rowcount(self):
-        return self.cursor.rowcount
-
-    def _convert_sql(self, sql: str) -> str:
-        sql = sql.replace("%s", "?")
-        sql = sql.replace("NOW()", "CURRENT_TIMESTAMP")
-        sql = sql.replace("AUTO_INCREMENT", "AUTOINCREMENT")
-        sql = sql.replace("TINYINT(1)", "INTEGER")
-        return sql
-
-    def execute(self, sql, params=None):
-        sql = self._convert_sql(sql)
-        if params is None:
-            params = ()
-        return self.cursor.execute(sql, params)
-
-    def executemany(self, sql, seq_of_params):
-        sql = self._convert_sql(sql)
-        return self.cursor.executemany(sql, seq_of_params)
-
-    def fetchone(self):
-        row = self.cursor.fetchone()
-        return dict(row) if row is not None else None
-
-    def fetchall(self):
-        return [dict(r) for r in self.cursor.fetchall()]
-
-
-class SQLiteConnection:
-    def __init__(self, path: str):
-        self.conn = sqlite3.connect(path, detect_types=sqlite3.PARSE_DECLTYPES)
-        self.conn.row_factory = sqlite3.Row
-        self._is_sqlite = True
-
-    def cursor(self):
-        return SQLiteCursor(self.conn.cursor())
-
-    def commit(self):
-        return self.conn.commit()
-
-    def rollback(self):
-        return self.conn.rollback()
-
-    def close(self):
-        return self.conn.close()
-
-
-def _connect_mysql():
-    return pymysql.connect(
-        host=Config.DB_HOST,
-        port=Config.DB_PORT,
-        user=Config.DB_USER,
-        password=Config.DB_PASSWORD,
-        database=Config.DB_NAME,
-        charset="utf8mb4",
-        cursorclass=pymysql.cursors.DictCursor,
-        autocommit=False,
-        connect_timeout=2,
-    )
-
-
-def _connect_sqlite():
-    os.makedirs(os.path.dirname(Config.SQLITE_PATH), exist_ok=True)
-    conn = SQLiteConnection(Config.SQLITE_PATH)
-    ensure_sqlite_schema(conn)
-    return conn
-
-
-def get_db():
-    """Return a per-request DB connection. MySQL first, SQLite fallback for demo."""
-    if "db" not in g:
-        try:
-            g.db = _connect_mysql()
-            g.db_kind = "mysql"
-        except Exception as exc:
-            if not Config.USE_SQLITE_FALLBACK:
-                raise
-            print(f"[database] MySQL unavailable, using SQLite demo DB: {exc}")
-            g.db = _connect_sqlite()
-            g.db_kind = "sqlite"
-    return g.db
-
-
-def get_db_kind():
-    get_db()
-    return getattr(g, "db_kind", "mysql")
-
-
-def close_db(e=None):
-    db = g.pop("db", None)
-    if db is not None:
-        db.close()
-    g.pop("db_kind", None)
-
-
-def init_app(app):
-    app.teardown_appcontext(close_db)
-
-
-def ensure_sqlite_schema(conn):
-    cur = conn.cursor()
-
+$replacement = @'
+    # Seed settings table
     cur.execute(
         """
-        CREATE TABLE IF NOT EXISTS clients (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            client_code TEXT NOT NULL UNIQUE,
-            name TEXT NOT NULL,
-            pan TEXT,
-            dob TEXT,
-            mobile TEXT NOT NULL,
-            parent_code TEXT,
-            password_hash TEXT NOT NULL,
-            role TEXT NOT NULL DEFAULT 'client',
-            status TEXT NOT NULL DEFAULT 'active',
-            must_change_password INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        CREATE TABLE IF NOT EXISTS app_settings (
+            setting_key TEXT PRIMARY KEY,
+            setting_value TEXT NOT NULL
         )
         """
     )
 
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS brokerage (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            client_code TEXT NOT NULL,
-            trade_date TEXT NOT NULL,
-            brokerage_amount REAL NOT NULL DEFAULT 0,
-            segment TEXT,
-            remark TEXT,
-            upload_id INTEGER,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    def get_setting(key):
+        cur.execute("SELECT setting_value FROM app_settings WHERE setting_key=?", (key,))
+        row = cur.fetchone()
+        return row["setting_value"] if row else None
+
+    def set_setting(key, value):
+        cur.execute(
+            """
+            INSERT INTO app_settings (setting_key, setting_value)
+            VALUES (?, ?)
+            ON CONFLICT(setting_key) DO UPDATE SET setting_value=excluded.setting_value
+            """,
+            (key, value),
         )
-        """
-    )
 
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS uploads (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            file_name TEXT NOT NULL,
-            upload_type TEXT NOT NULL,
-            total_rows INTEGER NOT NULL DEFAULT 0,
-            success_rows INTEGER NOT NULL DEFAULT 0,
-            failed_rows INTEGER NOT NULL DEFAULT 0,
-            duplicate_rows INTEGER NOT NULL DEFAULT 0,
-            uploaded_by TEXT NOT NULL,
-            uploaded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-        """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS upload_errors (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            upload_id INTEGER NOT NULL,
-            row_number INTEGER NOT NULL,
-            error_message TEXT NOT NULL,
-            row_data TEXT,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-        """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS password_reset_requests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            client_code TEXT NOT NULL,
-            mobile TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending',
-            requested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            resolved_at TEXT
-        )
-        """
-    )
-
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_clients_code ON clients(client_code)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_clients_parent ON clients(parent_code)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_brokerage_code ON brokerage(client_code)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_brokerage_date ON brokerage(trade_date)")
-
-    # Seed default admin and predefined demo clients.
-    # Password hash is created only when user is missing.
-    # This avoids slow bcrypt hashing on every dashboard request.
+    # Seed admin login only once
     try:
         from services.password_service import hash_password
 
-        seed_users = [
-            {
-                "client_code": "admin",
-                "name": "Admin User",
-                "pan": "",
-                "dob": "",
-                "mobile": "0000000000",
-                "parent_code": None,
-                "password": "Admin@123",
-                "role": "admin",
-            },
-            {
-                "client_code": "C1001",
-                "name": "Demo Client 1",
-                "pan": "ESZYC2037I",
-                "dob": "2000-01-01",
-                "mobile": "9870012345",
-                "parent_code": "admin",
-                "password": "9870012345",
-                "role": "client",
-            },
-            {
-                "client_code": "C1002",
-                "name": "Demo Client 2",
-                "pan": "BCCLF2074X",
-                "dob": "2000-01-01",
-                "mobile": "9870024690",
-                "parent_code": "admin",
-                "password": "9870024690",
-                "role": "client",
-            },
-            {
-                "client_code": "C1003",
-                "name": "Demo Client 3",
-                "pan": "DQWPS9981K",
-                "dob": "2000-01-01",
-                "mobile": "9870037035",
-                "parent_code": "admin",
-                "password": "9870037035",
-                "role": "client",
-            },
-        ]
+        if get_setting("admin_seed_done") != "1":
+            admin_hash = hash_password("Admin@123")
 
-        for user in seed_users:
-            cur.execute(
-                "SELECT id FROM clients WHERE client_code=?",
-                (user["client_code"],),
-            )
-            existing = cur.fetchone()
-
-            if existing:
-                # Do not update password_hash again and again.
+            cur.execute("SELECT id FROM clients WHERE client_code=?", ("admin",))
+            if cur.fetchone():
                 cur.execute(
                     """
                     UPDATE clients
-                    SET name=?,
-                        pan=?,
-                        dob=?,
-                        mobile=?,
-                        parent_code=?,
-                        role=?,
-                        status='active',
-                        must_change_password=0,
-                        updated_at=CURRENT_TIMESTAMP
+                    SET name=?, mobile=?, password_hash=?, role=?, status=?, must_change_password=0
                     WHERE client_code=?
                     """,
-                    (
-                        user["name"],
-                        user["pan"],
-                        user["dob"],
-                        user["mobile"],
-                        user["parent_code"],
-                        user["role"],
-                        user["client_code"],
-                    ),
+                    ("Admin User", "0000000000", admin_hash, "admin", "active", "admin"),
                 )
             else:
-                password_hash = hash_password(user["password"])
                 cur.execute(
                     """
                     INSERT INTO clients
-                    (client_code, name, pan, dob, mobile, parent_code,
-                     password_hash, role, status, must_change_password)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', 0)
+                    (client_code, name, mobile, password_hash, role, status, must_change_password)
+                    VALUES (?, ?, ?, ?, ?, ?, 0)
                     """,
-                    (
-                        user["client_code"],
-                        user["name"],
-                        user["pan"],
-                        user["dob"],
-                        user["mobile"],
-                        user["parent_code"],
-                        password_hash,
-                        user["role"],
-                    ),
+                    ("admin", "Admin User", "0000000000", admin_hash, "admin", "active"),
                 )
 
-        print("[database] Seed users ready: admin, C1001, C1002, C1003")
+            set_setting("admin_seed_done", "1")
+            print("[database] Admin login ready: admin / Admin@123")
 
     except Exception as exc:
-        print(f"[database] Could not seed users: {exc}")
+        print(f"[database] Could not seed admin: {exc}")
+
+    # Seed initial 100 clients permanently from backend/seed/client_master_100_sample.xlsx
+    try:
+        from openpyxl import load_workbook
+        from services.password_service import hash_password
+        from datetime import datetime, date
+
+        def clean_cell(value):
+            if value is None:
+                return ""
+            if isinstance(value, (datetime, date)):
+                return value.strftime("%Y-%m-%d")
+            if isinstance(value, float) and value.is_integer():
+                return str(int(value))
+            return str(value).strip()
+
+        if get_setting("initial_100_clients_seed_done") != "1":
+            seed_path = os.path.join(
+                os.path.dirname(__file__),
+                "seed",
+                "client_master_100_sample.xlsx",
+            )
+
+            if os.path.exists(seed_path):
+                wb = load_workbook(seed_path)
+                ws = wb.active
+
+                headers = [clean_cell(cell.value) for cell in ws[1]]
+                header_map = {name: idx for idx, name in enumerate(headers)}
+
+                required_cols = ["ClientCode", "Name", "Mobile"]
+                missing = [col for col in required_cols if col not in header_map]
+
+                if missing:
+                    print(f"[database] Seed file missing columns: {missing}")
+                else:
+                    inserted = 0
+                    updated = 0
+
+                    for row in ws.iter_rows(min_row=2, values_only=True):
+                        client_code = clean_cell(row[header_map["ClientCode"]])
+                        name = clean_cell(row[header_map["Name"]])
+                        mobile = clean_cell(row[header_map["Mobile"]])
+
+                        if not client_code or not name or not mobile:
+                            continue
+
+                        pan = clean_cell(row[header_map["PAN"]]) if "PAN" in header_map else ""
+                        dob = clean_cell(row[header_map["DOB"]]) if "DOB" in header_map else ""
+                        parent_code = clean_cell(row[header_map["ParentCode"]]) if "ParentCode" in header_map else "admin"
+                        status = clean_cell(row[header_map["Status"]]) if "Status" in header_map else "active"
+
+                        if not parent_code:
+                            parent_code = "admin"
+
+                        status = status.lower()
+                        if status not in ["active", "inactive"]:
+                            status = "active"
+
+                        cur.execute("SELECT id FROM clients WHERE client_code=?", (client_code,))
+                        existing = cur.fetchone()
+
+                        if existing:
+                            cur.execute(
+                                """
+                                UPDATE clients
+                                SET name=?,
+                                    pan=?,
+                                    dob=?,
+                                    mobile=?,
+                                    parent_code=?,
+                                    role='client',
+                                    status=?,
+                                    must_change_password=0,
+                                    updated_at=CURRENT_TIMESTAMP
+                                WHERE client_code=?
+                                """,
+                                (name, pan, dob, mobile, parent_code, status, client_code),
+                            )
+                            updated += 1
+                        else:
+                            password_hash = hash_password(mobile)
+                            cur.execute(
+                                """
+                                INSERT INTO clients
+                                (client_code, name, pan, dob, mobile, parent_code,
+                                 password_hash, role, status, must_change_password)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, 'client', ?, 0)
+                                """,
+                                (client_code, name, pan, dob, mobile, parent_code, password_hash, status),
+                            )
+                            inserted += 1
+
+                    set_setting("initial_100_clients_seed_done", "1")
+                    print(f"[database] Initial 100 clients seed done. Inserted={inserted}, Updated={updated}")
+
+            else:
+                print(f"[database] Seed Excel not found: {seed_path}")
+
+    except Exception as exc:
+        print(f"[database] Could not seed initial 100 clients: {exc}")
 
     conn.commit()
+'@
+
+Set-Content $path ($before + $replacement)
