@@ -121,6 +121,7 @@ def init_app(app):
 
 def ensure_sqlite_schema(conn):
     cur = conn.cursor()
+
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS clients (
@@ -140,6 +141,7 @@ def ensure_sqlite_schema(conn):
         )
         """
     )
+
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS brokerage (
@@ -154,6 +156,7 @@ def ensure_sqlite_schema(conn):
         )
         """
     )
+
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS uploads (
@@ -169,6 +172,7 @@ def ensure_sqlite_schema(conn):
         )
         """
     )
+
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS upload_errors (
@@ -181,6 +185,7 @@ def ensure_sqlite_schema(conn):
         )
         """
     )
+
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS password_reset_requests (
@@ -193,6 +198,7 @@ def ensure_sqlite_schema(conn):
         )
         """
     )
+
     cur.execute("CREATE INDEX IF NOT EXISTS idx_clients_code ON clients(client_code)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_clients_parent ON clients(parent_code)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_brokerage_code ON brokerage(client_code)")
@@ -201,19 +207,81 @@ def ensure_sqlite_schema(conn):
     # Create/repair default admin using runtime bcrypt so hash is always correct.
     try:
         from services.password_service import hash_password
+
         admin_hash = hash_password("Admin@123")
+
         cur.execute("SELECT id FROM clients WHERE client_code=?", ("admin",))
         if cur.fetchone():
             cur.execute(
-                "UPDATE clients SET name=?, mobile=?, password_hash=?, role=?, status=?, must_change_password=0 WHERE client_code=?",
+                """
+                UPDATE clients
+                SET name=?, mobile=?, password_hash=?, role=?, status=?, must_change_password=0
+                WHERE client_code=?
+                """,
                 ("Admin User", "0000000000", admin_hash, "admin", "active", "admin"),
             )
         else:
             cur.execute(
-                "INSERT INTO clients (client_code, name, mobile, password_hash, role, status, must_change_password) VALUES (?, ?, ?, ?, ?, ?, 0)",
+                """
+                INSERT INTO clients
+                (client_code, name, mobile, password_hash, role, status, must_change_password)
+                VALUES (?, ?, ?, ?, ?, ?, 0)
+                """,
                 ("admin", "Admin User", "0000000000", admin_hash, "admin", "active"),
             )
+
+        print("[database] Admin login ready: admin / Admin@123")
+
     except Exception as exc:
         print(f"[database] Could not create SQLite admin: {exc}")
+
+    # Create/repair predefined demo client logins.
+    # These clients can login directly without uploading Excel first.
+    try:
+        from services.password_service import hash_password
+
+        demo_clients = [
+            ("C1001", "Demo Client 1", "ESZYC2037I", "2000-01-01", "9870012345", "ADMIN"),
+            ("C1002", "Demo Client 2", "BCCLF2074X", "2000-01-01", "9870024690", "ADMIN"),
+            ("C1003", "Demo Client 3", "DQWPS9981K", "2000-01-01", "9870037035", "ADMIN"),
+        ]
+
+        for code, name, pan, dob, mobile, parent in demo_clients:
+            password_hash = hash_password(mobile)
+
+            cur.execute("SELECT id FROM clients WHERE client_code=?", (code,))
+            if cur.fetchone():
+                cur.execute(
+                    """
+                    UPDATE clients
+                    SET name=?,
+                        pan=?,
+                        dob=?,
+                        mobile=?,
+                        parent_code=?,
+                        password_hash=?,
+                        role='client',
+                        status='active',
+                        must_change_password=0,
+                        updated_at=CURRENT_TIMESTAMP
+                    WHERE client_code=?
+                    """,
+                    (name, pan, dob, mobile, parent, password_hash, code),
+                )
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO clients
+                    (client_code, name, pan, dob, mobile, parent_code,
+                     password_hash, role, status, must_change_password)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'client', 'active', 0)
+                    """,
+                    (code, name, pan, dob, mobile, parent, password_hash),
+                )
+
+        print("[database] Demo clients ready: C1001, C1002, C1003")
+
+    except Exception as exc:
+        print(f"[database] Could not create demo clients: {exc}")
 
     conn.commit()
